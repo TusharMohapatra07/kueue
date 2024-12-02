@@ -23,7 +23,6 @@ import (
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -34,15 +33,12 @@ import (
 )
 
 type Webhook struct {
-	client                     client.Client
-	manageJobsWithoutQueueName bool
+	client client.Client
 }
 
-func SetupWebhook(mgr ctrl.Manager, opts ...jobframework.Option) error {
-	options := jobframework.ProcessOptions(opts...)
+func SetupWebhook(mgr ctrl.Manager, _ ...jobframework.Option) error {
 	wh := &Webhook{
-		client:                     mgr.GetClient(),
-		manageJobsWithoutQueueName: options.ManageJobsWithoutQueueName,
+		client: mgr.GetClient(),
 	}
 	obj := &appsv1.Deployment{}
 	return webhook.WebhookManagedBy(mgr).
@@ -52,21 +48,21 @@ func SetupWebhook(mgr ctrl.Manager, opts ...jobframework.Option) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-apps-v1-deployment,mutating=true,failurePolicy=fail,sideEffects=None,groups="apps",resources=deployments,verbs=create,versions=v1,name=mdeployment.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-apps-v1-deployment,mutating=true,failurePolicy=fail,sideEffects=None,groups="apps",resources=deployments,verbs=create;update,versions=v1,name=mdeployment.kb.io,admissionReviewVersions=v1
 
 var _ admission.CustomDefaulter = &Webhook{}
 
 func (wh *Webhook) Default(ctx context.Context, obj runtime.Object) error {
-	d := fromObject(obj)
-	log := ctrl.LoggerFrom(ctx).WithName("deployment-webhook").WithValues("deployment", klog.KObj(d))
+	deployment := fromObject(obj)
+
+	log := ctrl.LoggerFrom(ctx).WithName("deployment-webhook")
 	log.V(5).Info("Applying defaults")
 
-	cqLabel, ok := d.Labels[constants.QueueLabel]
-	if ok {
-		if d.Spec.Template.Labels == nil {
-			d.Spec.Template.Labels = make(map[string]string, 1)
+	if queueName := jobframework.QueueNameForObject(deployment.Object()); queueName != "" {
+		if deployment.Spec.Template.Labels == nil {
+			deployment.Spec.Template.Labels = make(map[string]string, 1)
 		}
-		d.Spec.Template.Labels[constants.QueueLabel] = cqLabel
+		deployment.Spec.Template.Labels[constants.QueueLabel] = queueName
 	}
 
 	return nil
@@ -76,34 +72,40 @@ func (wh *Webhook) Default(ctx context.Context, obj runtime.Object) error {
 
 var _ admission.CustomValidator = &Webhook{}
 
-func (wh *Webhook) ValidateCreate(context.Context, runtime.Object) (warnings admission.Warnings, err error) {
-	return nil, nil
+func (wh *Webhook) ValidateCreate(ctx context.Context, obj runtime.Object) (warnings admission.Warnings, err error) {
+	deployment := fromObject(obj)
+
+	log := ctrl.LoggerFrom(ctx).WithName("deployment-webhook")
+	log.V(5).Info("Validating create")
+
+	allErrs := jobframework.ValidateQueueName(deployment.Object())
+
+	return nil, allErrs.ToAggregate()
 }
 
 var (
-	deploymentLabelsPath         = field.NewPath("metadata", "labels")
-	deploymentQueueNameLabelPath = deploymentLabelsPath.Key(constants.QueueLabel)
-
-	podSpecQueueNameLabelPath = field.NewPath("spec", "template", "metadata", "labels").
-					Key(constants.QueueLabel)
+	labelsPath         = field.NewPath("metadata", "labels")
+	queueNameLabelPath = labelsPath.Key(constants.QueueLabel)
 )
 
 func (wh *Webhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (warnings admission.Warnings, err error) {
 	oldDeployment := fromObject(oldObj)
 	newDeployment := fromObject(newObj)
 
-	log := ctrl.LoggerFrom(ctx).WithName("deployment-webhook").WithValues("deployment", klog.KObj(newDeployment))
+	log := ctrl.LoggerFrom(ctx).WithName("deployment-webhook")
 	log.V(5).Info("Validating update")
-	allErrs := apivalidation.ValidateImmutableField(
-		newDeployment.GetLabels()[constants.QueueLabel],
-		oldDeployment.GetLabels()[constants.QueueLabel],
-		deploymentQueueNameLabelPath,
-	)
-	allErrs = append(allErrs, apivalidation.ValidateImmutableField(
-		newDeployment.Spec.Template.GetLabels()[constants.QueueLabel],
-		oldDeployment.Spec.Template.GetLabels()[constants.QueueLabel],
-		podSpecQueueNameLabelPath,
-	)...)
+
+	oldQueueName := jobframework.QueueNameForObject(oldDeployment.Object())
+	newQueueName := jobframework.QueueNameForObject(newDeployment.Object())
+
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, jobframework.ValidateQueueName(newDeployment.Object())...)
+
+	// Prevents updating the queue-name if at least one Pod is not suspended
+	// or if the queue-name has been deleted.
+	if oldDeployment.Status.ReadyReplicas > 0 || newQueueName == "" {
+		allErrs = append(allErrs, apivalidation.ValidateImmutableField(oldQueueName, newQueueName, queueNameLabelPath)...)
+	}
 
 	return warnings, allErrs.ToAggregate()
 }

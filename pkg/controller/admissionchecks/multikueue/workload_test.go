@@ -28,6 +28,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
+	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -50,6 +52,9 @@ var (
 )
 
 func TestWlReconcile(t *testing.T) {
+	now := time.Now()
+	fakeClock := testingclock.NewFakeClock(now)
+
 	objCheckOpts := []cmp.Option{
 		cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion"),
 		cmpopts.EquateEmpty(),
@@ -804,7 +809,7 @@ func TestWlReconcile(t *testing.T) {
 					AdmissionCheck(kueue.AdmissionCheckState{
 						Name:               "ac1",
 						State:              kueue.CheckStateReady,
-						LastTransitionTime: metav1.NewTime(time.Now().Add(-defaultWorkerLostTimeout / 2)), // 50% of the timeout
+						LastTransitionTime: metav1.NewTime(now.Add(-defaultWorkerLostTimeout / 2)), // 50% of the timeout
 						Message:            `The workload got reservation on "worker1"`,
 					}).
 					ControllerReference(batchv1.SchemeGroupVersion.WithKind("Job"), "job1", "uid1").
@@ -832,7 +837,7 @@ func TestWlReconcile(t *testing.T) {
 					AdmissionCheck(kueue.AdmissionCheckState{
 						Name:               "ac1",
 						State:              kueue.CheckStateReady,
-						LastTransitionTime: metav1.NewTime(time.Now().Add(-defaultWorkerLostTimeout * 3 / 2)), // 150% of the timeout
+						LastTransitionTime: metav1.NewTime(now.Add(-defaultWorkerLostTimeout * 3 / 2)), // 150% of the timeout
 						Message:            `The workload got reservation on "worker1"`,
 					}).
 					ControllerReference(batchv1.SchemeGroupVersion.WithKind("Job"), "job1", "uid1").
@@ -911,7 +916,7 @@ func TestWlReconcile(t *testing.T) {
 				*baseWorkloadBuilder.Clone().
 					Label(kueue.MultiKueueOriginLabel, defaultOrigin).
 					ReserveQuota(utiltesting.MakeAdmission("q1").Obj()).
-					QuotaReservedTime(time.Now().Add(-time.Hour)). // one hour ago
+					QuotaReservedTime(now.Add(-time.Hour)). // one hour ago
 					Obj(),
 			},
 			worker1Jobs: []batchv1.Job{
@@ -924,7 +929,7 @@ func TestWlReconcile(t *testing.T) {
 				*baseWorkloadBuilder.Clone().
 					Label(kueue.MultiKueueOriginLabel, defaultOrigin).
 					ReserveQuota(utiltesting.MakeAdmission("q1").Obj()).
-					QuotaReservedTime(time.Now().Add(-time.Minute)). // one minute ago
+					QuotaReservedTime(now.Add(-time.Minute)). // one minute ago
 					Obj(),
 			},
 			worker2Jobs: []batchv1.Job{
@@ -981,8 +986,7 @@ func TestWlReconcile(t *testing.T) {
 			)
 
 			managerClient := managerBuilder.Build()
-
-			adapters, _ := jobframework.GetMultiKueueAdapters()
+			adapters, _ := jobframework.GetMultiKueueAdapters(sets.New[string]("batch/job"))
 			cRec := newClustersReconciler(managerClient, TestNamespace, 0, defaultOrigin, nil, adapters)
 
 			worker1Builder, _ := getClientBuilder()
@@ -1029,7 +1033,7 @@ func TestWlReconcile(t *testing.T) {
 			}
 
 			helper, _ := newMultiKueueStoreHelper(managerClient)
-			reconciler := newWlReconciler(managerClient, helper, cRec, defaultOrigin, defaultWorkerLostTimeout, time.Second, adapters)
+			reconciler := newWlReconciler(managerClient, helper, cRec, defaultOrigin, defaultWorkerLostTimeout, time.Second, adapters, WithClock(t, fakeClock))
 
 			for _, val := range tc.managersDeletedWorkloads {
 				reconciler.Delete(event.DeleteEvent{

@@ -33,11 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/kueue/pkg/controller/constants"
 
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/apis/v1alpha1"
+	kjobctlconstants "sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/constants"
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/parser"
 )
 
@@ -82,15 +81,13 @@ var (
 type slurmBuilder struct {
 	*Builder
 
-	objectName              string
-	scriptContent           string
-	template                *template.Template
-	arrayIndexes            parser.ArrayIndexes
-	cpusOnNode              *resource.Quantity
-	cpusPerGpu              *resource.Quantity
-	totalMemPerNode         *resource.Quantity
-	totalGpus               *resource.Quantity
-	maxExecutionTimeSeconds *int32
+	scriptContent   string
+	template        *template.Template
+	arrayIndexes    parser.ArrayIndexes
+	cpusOnNode      *resource.Quantity
+	cpusPerGpu      *resource.Quantity
+	totalMemPerNode *resource.Quantity
+	totalGpus       *resource.Quantity
 }
 
 var _ builder = (*slurmBuilder)(nil)
@@ -148,15 +145,6 @@ func (b *slurmBuilder) complete() error {
 		}
 	}
 
-	if b.timeLimit != "" {
-		b.maxExecutionTimeSeconds, err = parser.TimeLimitToSeconds(b.timeLimit)
-		if err != nil {
-			return fmt.Errorf("cannot parse '%s': %w", b.timeLimit, err)
-		}
-	}
-
-	b.objectName = b.generatePrefixName() + utilrand.String(5)
-
 	return nil
 }
 
@@ -205,20 +193,26 @@ func (b *slurmBuilder) build(ctx context.Context) (runtime.Object, []runtime.Obj
 		return nil, nil, err
 	}
 
-	objectMeta := b.buildObjectMeta(template.Template.ObjectMeta)
-	objectMeta.GenerateName = ""
-	objectMeta.Name = b.objectName
+	objectMeta, err := b.buildObjectMeta(template.Template.ObjectMeta, true)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if b.script != "" {
+		if objectMeta.Annotations == nil {
+			objectMeta.Annotations = make(map[string]string, 1)
+		}
+		objectMeta.Annotations[kjobctlconstants.ScriptAnnotation] = b.script
+	}
 
 	job := &batchv1.Job{
 		TypeMeta:   metav1.TypeMeta{Kind: "Job", APIVersion: "batch/v1"},
 		ObjectMeta: objectMeta,
 		Spec:       template.Template.Spec,
 	}
-	if b.maxExecutionTimeSeconds != nil {
-		job.Labels[constants.MaxExecTimeSecondsLabel] = fmt.Sprint(ptr.Deref(b.maxExecutionTimeSeconds, 0))
-	}
+
 	job.Spec.CompletionMode = ptr.To(batchv1.IndexedCompletion)
-	job.Spec.Template.Spec.Subdomain = b.objectName
+	job.Spec.Template.Spec.Subdomain = job.Name
 
 	b.buildPodSpecVolumesAndEnv(&job.Spec.Template.Spec)
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes,
@@ -227,7 +221,7 @@ func (b *slurmBuilder) build(ctx context.Context) (runtime.Object, []runtime.Obj
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: b.objectName,
+						Name: job.Name,
 					},
 					Items: []corev1.KeyToPath{
 						{
@@ -423,7 +417,7 @@ func (b *slurmBuilder) build(ctx context.Context) (runtime.Object, []runtime.Obj
 		b.cpusPerGpu = resource.NewQuantity(cpusPerGpu, b.cpusOnNode.Format)
 	}
 
-	initEntrypointScript, err := b.buildInitEntrypointScript()
+	initEntrypointScript, err := b.buildInitEntrypointScript(job.Name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -435,7 +429,7 @@ func (b *slurmBuilder) build(ctx context.Context) (runtime.Object, []runtime.Obj
 
 	configMap := &corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
-		ObjectMeta: objectMeta,
+		ObjectMeta: b.buildChildObjectMeta(job.Name),
 		Data: map[string]string{
 			slurmInitEntrypointFilename: initEntrypointScript,
 			slurmEntrypointFilename:     entrypointScript,
@@ -445,11 +439,11 @@ func (b *slurmBuilder) build(ctx context.Context) (runtime.Object, []runtime.Obj
 
 	service := &corev1.Service{
 		TypeMeta:   metav1.TypeMeta{Kind: "Service", APIVersion: "v1"},
-		ObjectMeta: objectMeta,
+		ObjectMeta: b.buildChildObjectMeta(job.Name),
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
 			Selector: map[string]string{
-				"job-name": b.objectName,
+				"job-name": job.Name,
 			},
 		},
 	}
@@ -517,19 +511,19 @@ type slurmInitEntrypointScript struct {
 	FirstNodeIPTimeoutSeconds int32
 }
 
-func (b *slurmBuilder) buildInitEntrypointScript() (string, error) {
+func (b *slurmBuilder) buildInitEntrypointScript(jobName string) (string, error) {
 	nTasks := ptr.Deref(b.nTasks, 1)
 	nodes := ptr.Deref(b.nodes, 1)
 
 	nodeList := make([]string, nodes)
 	for i := int32(0); i < nodes; i++ {
-		nodeList[i] = fmt.Sprintf("%s-%d.%s", b.objectName, i, b.objectName)
+		nodeList[i] = fmt.Sprintf("%s-%d.%s", jobName, i, jobName)
 	}
 
 	scriptValues := slurmInitEntrypointScript{
 		ArrayIndexes: b.buildArrayIndexes(),
 
-		JobName:   b.objectName,
+		JobName:   jobName,
 		Namespace: b.namespace,
 
 		EnvsPath:         slurmEnvsPath,

@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/duration"
 	describehelper "k8s.io/kubectl/pkg/describe"
 	"k8s.io/utils/ptr"
+	utilmaps "sigs.k8s.io/kueue/pkg/util/maps"
 )
 
 // ResourceDescriber generates output for the named resource or an error
@@ -85,6 +86,7 @@ func describeJob(job *batchv1.Job) (string, error) {
 		w.Write(IndentLevelZero, "Name:\t%s\n", job.Name)
 		w.Write(IndentLevelZero, "Namespace:\t%s\n", job.Namespace)
 		printLabelsMultiline(w, "Labels", job.Labels)
+		printLabelsMultiline(w, "Annotations", job.Annotations)
 		if job.Spec.Parallelism != nil {
 			w.Write(IndentLevelZero, "Parallelism:\t%d\n", *job.Spec.Parallelism)
 		}
@@ -316,16 +318,14 @@ func describeConfigMap(configMap *corev1.ConfigMap) (string, error) {
 		printLabelsMultiline(w, "Labels", configMap.Labels)
 
 		w.Write(IndentLevelZero, "\nData\n====\n")
-		sortedKeys := sortMapKeys(configMap.Data)
-		for _, k := range sortedKeys {
+		for _, k := range utilmaps.SortedKeys(configMap.Data) {
 			w.Write(IndentLevelZero, "%s:\n----\n", k)
 			w.Write(IndentLevelZero, "%s\n", configMap.Data[k])
 			w.Write(IndentLevelZero, "\n")
 		}
 
 		w.Write(IndentLevelZero, "\nBinaryData\n====\n")
-		sortedKeys = sortMapKeys(configMap.BinaryData)
-		for _, k := range sortedKeys {
+		for _, k := range utilmaps.SortedKeys(configMap.BinaryData) {
 			w.Write(IndentLevelZero, "%s: %s bytes\n", k, strconv.Itoa(len(configMap.BinaryData[k])))
 		}
 		w.Write(IndentLevelZero, "\n")

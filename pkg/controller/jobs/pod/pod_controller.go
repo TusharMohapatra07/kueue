@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
 	"sigs.k8s.io/kueue/pkg/constants"
 	controllerconsts "sigs.k8s.io/kueue/pkg/controller/constants"
@@ -54,7 +55,6 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
 	clientutil "sigs.k8s.io/kueue/pkg/util/client"
 	"sigs.k8s.io/kueue/pkg/util/expectations"
-	"sigs.k8s.io/kueue/pkg/util/kubeversion"
 	"sigs.k8s.io/kueue/pkg/util/maps"
 	"sigs.k8s.io/kueue/pkg/util/parallelize"
 	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
@@ -86,21 +86,21 @@ const (
 )
 
 var (
-	gvk                          = corev1.SchemeGroupVersion.WithKind("Pod")
-	errIncorrectReconcileRequest = errors.New("event handler error: got a single pod reconcile request for a pod group")
-	errPendingOps                = jobframework.UnretryableError("waiting to observe previous operations on pods")
-	errPodNoSupportKubeVersion   = errors.New("pod integration only supported in Kubernetes 1.27 or newer")
-	errPodGroupLabelsMismatch    = errors.New("constructing workload: pods have different label values")
+	gvk                           = corev1.SchemeGroupVersion.WithKind("Pod")
+	errIncorrectReconcileRequest  = errors.New("event handler error: got a single pod reconcile request for a pod group")
+	errPendingOps                 = jobframework.UnretryableError("waiting to observe previous operations on pods")
+	errPodGroupLabelsMismatch     = errors.New("constructing workload: pods have different label values")
+	errIndexGreaterThanGroupCount = errors.New("incorrect label value: group pod index should be less than group total count")
+	errGroupIndexLessThanZero     = errors.New("incorrect label value: group pod index should be greater than zero")
 )
 
 func init() {
 	utilruntime.Must(jobframework.RegisterIntegration(FrameworkName, jobframework.IntegrationCallbacks{
-		SetupIndexes:          SetupIndexes,
-		NewJob:                NewJob,
-		NewReconciler:         NewReconciler,
-		SetupWebhook:          SetupWebhook,
-		JobType:               &corev1.Pod{},
-		CanSupportIntegration: CanSupportIntegration,
+		SetupIndexes:  SetupIndexes,
+		NewJob:        NewJob,
+		NewReconciler: NewReconciler,
+		SetupWebhook:  SetupWebhook,
+		JobType:       &corev1.Pod{},
 	}))
 }
 
@@ -497,16 +497,6 @@ func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {
 	return nil
 }
 
-func CanSupportIntegration(opts ...jobframework.Option) (bool, error) {
-	options := jobframework.ProcessOptions(opts...)
-
-	v := options.KubeServerVersion.GetServerVersion()
-	if v.String() == "" || v.LessThan(kubeversion.KubeVersion1_27) {
-		return false, fmt.Errorf("kubernetesVersion %q: %w", v.String(), errPodNoSupportKubeVersion)
-	}
-	return true, nil
-}
-
 func (p *Pod) Finalize(ctx context.Context, c client.Client) error {
 	groupName := podGroupName(p.pod)
 
@@ -567,6 +557,25 @@ func (p *Pod) groupTotalCount() (int, error) {
 	}
 
 	return gtc, nil
+}
+
+// podGroupIndex returns the value of GroupIndexLabel for the pod being reconciled at the moment.
+func (p *Pod) podGroupIndex(podGroupTotalCount int) (*int, error) {
+	podIndex, ok := p.Object().GetLabels()[kueuealpha.PodGroupPodIndexLabel]
+	if !ok {
+		return nil, nil
+	}
+	groupIndexValue, err := strconv.Atoi(podIndex)
+	if err != nil {
+		return nil, err
+	}
+	if groupIndexValue >= podGroupTotalCount {
+		return nil, errIndexGreaterThanGroupCount
+	}
+	if groupIndexValue < 0 {
+		return nil, errGroupIndexLessThanZero
+	}
+	return &groupIndexValue, nil
 }
 
 // getRoleHash will filter all the fields of the pod that are relevant to admission (pod role) and return a sha256
@@ -714,6 +723,9 @@ func constructGroupPodSets(pods []corev1.Pod) ([]kueue.PodSet, error) {
 func (p *Pod) validatePodGroupMetadata(r record.EventRecorder, activePods []corev1.Pod) error {
 	groupTotalCount, err := p.groupTotalCount()
 	if err != nil {
+		return err
+	}
+	if _, err = p.podGroupIndex(groupTotalCount); err != nil {
 		return err
 	}
 	originalQueue := jobframework.QueueName(p)

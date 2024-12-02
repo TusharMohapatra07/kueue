@@ -29,12 +29,14 @@ import (
 	"github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/kueue/pkg/util/maps"
 
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/apis/v1alpha1"
+	kjobctlconstants "sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/constants"
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/testing/wrappers"
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/test/util"
 )
@@ -121,7 +123,7 @@ var _ = ginkgo.Describe("Slurm", ginkgo.Ordered, func() {
 			gomega.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: jobName}, job)).To(gomega.Succeed())
 			gomega.Expect(ptr.Deref(job.Spec.Completions, 1)).To(gomega.Equal(expectCompletions))
 			gomega.Expect(ptr.Deref(job.Spec.Parallelism, 1)).To(gomega.Equal(expectParallelism))
-
+			gomega.Expect(job.Annotations).To(gomega.HaveKeyWithValue(kjobctlconstants.ScriptAnnotation, script.Name()))
 			gomega.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: configMapName}, configMap)).To(gomega.Succeed())
 			gomega.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: serviceName}, service)).To(gomega.Succeed())
 		})
@@ -282,6 +284,64 @@ var _ = ginkgo.Describe("Slurm", ginkgo.Ordered, func() {
 			true,
 		),
 	)
+
+	ginkgo.When("delete", func() {
+		ginkgo.It("should delete job and child objects", func() {
+			ginkgo.By("Create temporary file")
+			script, err := os.CreateTemp("", "e2e-slurm-")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			defer script.Close()
+			defer os.Remove(script.Name())
+
+			ginkgo.By("Prepare script", func() {
+				_, err := script.WriteString("#!/bin/bash\nsleep 600")
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			})
+
+			var jobName, configMapName, serviceName string
+
+			ginkgo.By("Create slurm", func() {
+				cmdArgs := []string{"create", "slurm", "-n", ns.Name, "--profile", profile.Name}
+				cmdArgs = append(cmdArgs, "--", script.Name())
+
+				cmd := exec.Command(kjobctlPath, cmdArgs...)
+				out, err := util.Run(cmd)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "%s: %s", err, out)
+				gomega.Expect(out).NotTo(gomega.BeEmpty())
+
+				jobName, configMapName, serviceName, err = parseSlurmCreateOutput(out, profile.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Expect(jobName).NotTo(gomega.BeEmpty())
+				gomega.Expect(configMapName).NotTo(gomega.BeEmpty())
+				gomega.Expect(serviceName).NotTo(gomega.BeEmpty())
+			})
+
+			job := &batchv1.Job{}
+			configMap := &corev1.Service{}
+			service := &corev1.Service{}
+
+			ginkgo.By("Check slurm is created", func() {
+				gomega.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: jobName}, job)).To(gomega.Succeed())
+				gomega.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: configMapName}, configMap)).To(gomega.Succeed())
+				gomega.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: serviceName}, service)).To(gomega.Succeed())
+			})
+
+			ginkgo.By("Delete slurm", func() {
+				cmd := exec.Command(kjobctlPath, "delete", "slurm", "-n", ns.Name, jobName)
+				out, err := util.Run(cmd)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "%s: %s", err, out)
+				gomega.Expect(string(out)).To(gomega.Equal(fmt.Sprintf("job.batch/%s deleted\n", jobName)))
+			})
+
+			ginkgo.By("Check job and child objects are deleted", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(job), job))).To(gomega.BeTrue())
+					g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap))).To(gomega.BeTrue())
+					g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(service), service))).To(gomega.BeTrue())
+				}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			})
+		})
+	})
 })
 
 func parseSlurmCreateOutput(output []byte, profileName string) (string, string, string, error) {

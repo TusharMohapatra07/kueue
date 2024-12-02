@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	kueueversioned "sigs.k8s.io/kueue/client-go/clientset/versioned"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/client-go/clientset/versioned"
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/cmd/util"
 	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/constants"
+	"sigs.k8s.io/kueue/cmd/experimental/kjobctl/pkg/parser"
 )
 
 var (
@@ -533,14 +535,37 @@ func (b *Builder) setClients() error {
 	return nil
 }
 
-func (b *Builder) buildObjectMeta(templateObjectMeta metav1.ObjectMeta) metav1.ObjectMeta {
+func (b *Builder) buildObjectMeta(templateObjectMeta metav1.ObjectMeta, strictNaming bool) (metav1.ObjectMeta, error) {
 	objectMeta := metav1.ObjectMeta{
-		Namespace:    b.profile.Namespace,
-		GenerateName: b.generatePrefixName(),
-		Labels:       templateObjectMeta.Labels,
-		Annotations:  templateObjectMeta.Annotations,
+		Namespace:   b.profile.Namespace,
+		Labels:      templateObjectMeta.Labels,
+		Annotations: templateObjectMeta.Annotations,
 	}
 
+	if strictNaming {
+		objectMeta.Name = b.generatePrefixName() + utilrand.String(5)
+	} else {
+		objectMeta.GenerateName = b.generatePrefixName()
+	}
+
+	b.withKjobLabels(&objectMeta)
+	if err := b.withKueueLabels(&objectMeta); err != nil {
+		return metav1.ObjectMeta{}, err
+	}
+
+	return objectMeta, nil
+}
+
+func (b *Builder) buildChildObjectMeta(name string) metav1.ObjectMeta {
+	objectMeta := metav1.ObjectMeta{
+		Name:      name,
+		Namespace: b.profile.Namespace,
+	}
+	b.withKjobLabels(&objectMeta)
+	return objectMeta
+}
+
+func (b *Builder) withKjobLabels(objectMeta *metav1.ObjectMeta) {
 	if objectMeta.Labels == nil {
 		objectMeta.Labels = map[string]string{}
 	}
@@ -552,6 +577,12 @@ func (b *Builder) buildObjectMeta(templateObjectMeta metav1.ObjectMeta) metav1.O
 	if b.mode != nil {
 		objectMeta.Labels[constants.ModeLabel] = string(b.mode.Name)
 	}
+}
+
+func (b *Builder) withKueueLabels(objectMeta *metav1.ObjectMeta) error {
+	if objectMeta.Labels == nil {
+		objectMeta.Labels = map[string]string{}
+	}
 
 	if len(b.localQueue) > 0 {
 		objectMeta.Labels[kueueconstants.QueueLabel] = b.localQueue
@@ -561,7 +592,18 @@ func (b *Builder) buildObjectMeta(templateObjectMeta metav1.ObjectMeta) metav1.O
 		objectMeta.Labels[kueueconstants.WorkloadPriorityClassLabel] = b.priority
 	}
 
-	return objectMeta
+	if b.timeLimit != "" {
+		maxExecutionTimeSeconds, err := parser.TimeLimitToSeconds(b.timeLimit)
+		if err != nil {
+			return fmt.Errorf("cannot parse '%s': %w", b.timeLimit, err)
+		}
+
+		if ptr.Deref(maxExecutionTimeSeconds, 0) > 0 {
+			objectMeta.Labels[kueueconstants.MaxExecTimeSecondsLabel] = fmt.Sprint(*maxExecutionTimeSeconds)
+		}
+	}
+
+	return nil
 }
 
 func (b *Builder) buildPodSpec(templateSpec corev1.PodSpec) corev1.PodSpec {

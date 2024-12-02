@@ -76,7 +76,7 @@ LD_FLAGS += -X '$(version_pkg).GitCommit=$(shell git rev-parse HEAD)'
 
 # Update these variables when preparing a new release or a release branch.
 # Then run `make prepare-release-branch`
-RELEASE_VERSION=v0.9.0
+RELEASE_VERSION=v0.9.1
 RELEASE_BRANCH=main
 
 .PHONY: all
@@ -280,6 +280,7 @@ artifacts: kustomize yq helm ## Generate release artifacts.
 .PHONY: prepare-release-branch
 prepare-release-branch: yq kustomize ## Prepare the release branch with the release version.
 	$(SED) -r 's/v[0-9]+\.[0-9]+\.[0-9]+/$(RELEASE_VERSION)/g' -i README.md -i site/hugo.toml
+	$(SED) -r 's/--version="v[0-9]+\.[0-9]+\.[0-9]+/--version="$(RELEASE_VERSION)/g' -i charts/kueue/README.md
 	$(YQ) e '.appVersion = "$(RELEASE_VERSION)"' -i charts/kueue/Chart.yaml
 	@$(call clean-manifests)
 

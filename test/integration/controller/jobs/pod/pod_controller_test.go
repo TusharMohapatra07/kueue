@@ -42,6 +42,7 @@ import (
 	podcontroller "sigs.k8s.io/kueue/pkg/controller/jobs/pod"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/testing"
+	testingnode "sigs.k8s.io/kueue/pkg/util/testingjobs/node"
 	testingpod "sigs.k8s.io/kueue/pkg/util/testingjobs/pod"
 	"sigs.k8s.io/kueue/pkg/workload"
 	"sigs.k8s.io/kueue/test/util"
@@ -1833,7 +1834,7 @@ var _ = ginkgo.Describe("Pod controller interacting with Workload controller whe
 					gomega.BeComparableTo(metav1.Condition{
 						Type:    kueue.WorkloadEvicted,
 						Status:  metav1.ConditionTrue,
-						Reason:  "InactiveWorkloadRequeuingLimitExceeded",
+						Reason:  "DeactivatedDueToRequeuingLimitExceeded",
 						Message: "The workload is deactivated due to exceeding the maximum number of re-queuing retries",
 					}, util.IgnoreConditionTimestampsAndObservedGeneration),
 					gomega.BeComparableTo(metav1.Condition{
@@ -1845,7 +1846,7 @@ var _ = ginkgo.Describe("Pod controller interacting with Workload controller whe
 					gomega.BeComparableTo(metav1.Condition{
 						Type:    podcontroller.WorkloadWaitingForReplacementPods,
 						Status:  metav1.ConditionTrue,
-						Reason:  "InactiveWorkloadRequeuingLimitExceeded",
+						Reason:  "DeactivatedDueToRequeuingLimitExceeded",
 						Message: "The workload is deactivated due to exceeding the maximum number of re-queuing retries",
 					}, util.IgnoreConditionTimestampsAndObservedGeneration),
 				))
@@ -1902,27 +1903,15 @@ var _ = ginkgo.Describe("Pod controller when TopologyAwareScheduling enabled", g
 		gomega.Expect(k8sClient.Create(ctx, ns)).To(gomega.Succeed())
 
 		nodes = []corev1.Node{
-			{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "b1",
-					Labels: map[string]string{
-						nodeGroupLabel: "tas",
-						tasBlockLabel:  "b1",
-					},
-				},
-				Status: corev1.NodeStatus{
-					Allocatable: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("1"),
-						corev1.ResourceMemory: resource.MustParse("1Gi"),
-					},
-					Conditions: []corev1.NodeCondition{
-						{
-							Type:   corev1.NodeReady,
-							Status: corev1.ConditionTrue,
-						},
-					},
-				},
-			},
+			*testingnode.MakeNode("b1").
+				Label(nodeGroupLabel, "tas").
+				Label(tasBlockLabel, "b1").
+				StatusAllocatable(corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				}).
+				Ready().
+				Obj(),
 		}
 		for _, node := range nodes {
 			gomega.Expect(k8sClient.Create(ctx, &node)).Should(gomega.Succeed())
@@ -2016,7 +2005,7 @@ var _ = ginkgo.Describe("Pod controller when TopologyAwareScheduling enabled", g
 			Queue(localQueue.Name).
 			Annotation(kueuealpha.PodSetRequiredTopologyAnnotation, tasBlockLabel).
 			Request(corev1.ResourceCPU, "100m").
-			MakeGroup(2)
+			MakeIndexedGroup(2)
 		ginkgo.By("Creating the Pod group", func() {
 			for _, p := range group {
 				gomega.Expect(k8sClient.Create(ctx, p)).To(gomega.Succeed())

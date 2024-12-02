@@ -1,3 +1,30 @@
+## v0.9.1
+
+Changes since `v0.9.0`:
+
+> [!NOTE]
+> The previously anticipated feature for Topology Aware Scheduling (TAS) Rank Ordering is not part of this 
+> patch release. This functionality has been deferred and will be included in an upcoming release.
+
+## Changes by Kind
+
+### Bug or Regression
+
+- Change, and in some scenarios fix, the status message displayed to user when a workload doesn't fit in available capacity. (#3549, @gabesaba)
+- Determine borrowing more accurately, allowing preempting workloads which fit in nominal quota to schedule faster (#3550, @gabesaba)
+- Fix accounting for usage coming from TAS workloads using multiple resources. The usage was multiplied
+  by the number of resources requested by a workload, which could result in under-utilization of the cluster.
+  It also manifested itself in the message in the workload status which could contain negative numbers. (#3513, @mimowo)
+- Fix computing the topology assignment for workloads using multiple PodSets requesting the same
+  topology. In particular, it was possible for the set of topology domains in the assignment to be empty,
+  and as a consequence the pods would remain gated forever as the TopologyUngater would not have
+  topology assignment information. (#3524, @mimowo)
+- Fix running Job when parallelism < completions, before the fix the replacement pods for the successfully
+  completed Pods were not ungated. (#3561, @mimowo)
+- Fix the flow of deactivation for workloads due to rejected AdmissionChecks.
+  Now, all AdmissionChecks are reset back to the Pending state on eviction (and deactivation in particular),
+  and so an admin can easily re-activate such a workload manually without tweaking the checks. (#3518, @KPostOffice)
+
 ## v0.9.0
 
 Changes since `v0.8.0`:
@@ -25,6 +52,33 @@ Changes since `v0.8.0`:
  - The QueueVisibility feature and its corresponding API was deprecated.
 
   The QueueVisibility feature and its corresponding API was deprecated and will be removed in the v1beta2. Please use VisibilityOnDemand (https://kueue.sigs.k8s.io/docs/tasks/manage/monitor_pending_workloads/pending_workloads_on_demand/) instead. (#3110, @mbobrovskyi)
+
+## Upgrading steps
+
+### 1. Backup MultiKueue Resources (skip if you are not using MultiKueue):
+```
+kubectl get multikueueclusters.kueue.x-k8s.io,multikueueconfigs.kueue.x-k8s.io -A -o yaml > mk.yaml
+```
+
+### 2. Update apiVersion in Backup File (skip if you are not using MultiKueue):
+Replace `v1alpha1` with `v1beta1` in `mk.yaml` for all resources:
+```
+sed -i -e 's/v1alpha1/v1beta1/g' mk.yaml
+```
+
+### 3. Delete old CRDs:
+```
+kubectl delete crd multikueueclusters.kueue.x-k8s.io
+kubectl delete crd multikueueconfigs.kueue.x-k8s.io
+```
+
+### 4.Install Kueue v0.9.x:
+Follow the instruction [here](https://kueue.sigs.k8s.io/docs/installation/#install-a-released-version) to install.
+
+### 5. Restore MultiKueue Resources (skip if you are not using MultiKueue):
+```
+kubectl apply -f mk.yaml
+```
 
 ## Changes by Kind
 

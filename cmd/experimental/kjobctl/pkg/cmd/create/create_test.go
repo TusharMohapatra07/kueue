@@ -1214,7 +1214,6 @@ export $(cat /slurm/env/$JOB_CONTAINER_INDEX/slurm.env | xargs)
 							}).
 							Profile("profile").
 							Mode(v1alpha1.SlurmMode).
-							LocalQueue("lq1").
 							Data(map[string]string{
 								"script": "#!/bin/bash\nsleep 300'",
 								"init-entrypoint.sh": `#!/bin/sh
@@ -1324,7 +1323,6 @@ export $(cat /slurm/env/$JOB_CONTAINER_INDEX/slurm.env | xargs)cd /mydir
 						*wrappers.MakeService("profile-slurm", metav1.NamespaceDefault).
 							Profile("profile").
 							Mode(v1alpha1.SlurmMode).
-							LocalQueue("lq1").
 							ClusterIP("None").
 							Selector("job-name", "profile-slurm").
 							WithOwnerReference(metav1.OwnerReference{
@@ -2085,6 +2083,15 @@ export $(cat /slurm/env/$JOB_CONTAINER_INDEX/slurm.env | xargs)cd /mydir
 				if err != nil {
 					t.Error(err)
 					return
+				}
+
+				if job, ok := tc.wantLists[index].(*batchv1.JobList); ok && len(job.Items) > 0 {
+					if tc.tempFile != "" {
+						if job.Items[0].Annotations == nil {
+							job.Items[0].Annotations = make(map[string]string)
+						}
+						job.Items[0].Annotations[constants.ScriptAnnotation] = tc.tempFile
+					}
 				}
 
 				if diff := cmp.Diff(tc.wantLists[index], gotList, tc.cmpopts...); diff != "" {

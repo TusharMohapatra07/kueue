@@ -59,6 +59,10 @@ const (
 	// from the Job's PodTemplate also have the label. For the Pod-based
 	// integrations the label is added in webhook during the Pod creation.
 	TASLabel = "kueue.x-k8s.io/tas"
+
+	// PodGroupPodIndexLabel is a label set on the Pod's metadata belonging
+	// to a Pod group. It indicates the Pod's index within the group.
+	PodGroupPodIndexLabel = "kueue.x-k8s.io/pod-group-pod-index"
 )
 
 // TopologySpec defines the desired state of Topology
@@ -69,6 +73,7 @@ type TopologySpec struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="the levels field is immutable"
 	Levels []TopologyLevel `json:"levels,omitempty"`
 }
 

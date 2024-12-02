@@ -121,19 +121,6 @@ type queue struct {
 	admittedUsage resources.FlavorResourceQuantities
 }
 
-// FitInCohort supports the legacy
-// features.MultiplePreemptions=false path. It doesn't take into
-// account BorrowingLimits. To be cleaned up in v0.10, when we delete
-// the old code.
-func (c *ClusterQueueSnapshot) FitInCohort(q resources.FlavorResourceQuantities) bool {
-	for fr, value := range q {
-		if available(c, fr, false) < value {
-			return false
-		}
-	}
-	return true
-}
-
 func (c *clusterQueue) Active() bool {
 	return c.Status == active
 }
@@ -518,19 +505,23 @@ func (c *clusterQueue) reportActiveWorkloads() {
 func (c *clusterQueue) updateWorkloadUsage(wi *workload.Info, m int64) {
 	admitted := workload.IsAdmitted(wi.Obj)
 	frUsage := wi.FlavorResourceUsage()
-	tasUsage := wi.TASUsage()
 	for fr, q := range frUsage {
-		tasFlvCache := c.tasFlavorCache(fr.Flavor)
 		if m == 1 {
 			addUsage(c, fr, q)
-			if tasFlvCache != nil {
-				tasFlvCache.addUsage(tasUsage)
-			}
 		}
 		if m == -1 {
 			removeUsage(c, fr, q)
-			if tasFlvCache != nil {
-				tasFlvCache.removeUsage(tasUsage)
+		}
+	}
+	if features.Enabled(features.TopologyAwareScheduling) && wi.IsUsingTAS() {
+		for tasFlavor, tasUsage := range wi.TASUsage() {
+			if tasFlvCache := c.tasFlavorCache(tasFlavor); tasFlvCache != nil {
+				if m == 1 {
+					tasFlvCache.addUsage(tasUsage)
+				}
+				if m == -1 {
+					tasFlvCache.removeUsage(tasUsage)
+				}
 			}
 		}
 	}
@@ -598,10 +589,10 @@ func (c *clusterQueue) deleteLocalQueue(q *kueue.LocalQueue) {
 	delete(c.localQueues, qKey)
 }
 
-func (c *clusterQueue) flavorInUse(flavor string) bool {
+func (c *clusterQueue) flavorInUse(flavor kueue.ResourceFlavorReference) bool {
 	for _, rg := range c.ResourceGroups {
 		for _, fName := range rg.Flavors {
-			if kueue.ResourceFlavorReference(flavor) == fName {
+			if flavor == fName {
 				return true
 			}
 		}

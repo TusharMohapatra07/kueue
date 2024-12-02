@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
@@ -95,6 +96,51 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestValidateCreate(t *testing.T) {
+	testCases := map[string]struct {
+		sts       *appsv1.StatefulSet
+		wantErr   error
+		wantWarns admission.Warnings
+	}{
+		"without queue": {
+			sts: testingstatefulset.MakeStatefulSet("test-pod", "").Obj(),
+		},
+		"valid queue name": {
+			sts: testingstatefulset.MakeStatefulSet("test-pod", "").
+				Queue("test-queue").
+				Obj(),
+		},
+		"invalid queue name": {
+			sts: testingstatefulset.MakeStatefulSet("test-pod", "").
+				Queue("test/queue").
+				Obj(),
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "metadata.labels[kueue.x-k8s.io/queue-name]",
+				},
+			}.ToAggregate(),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(jobframework.EnableIntegrationsForTest(t, "pod"))
+			builder := utiltesting.NewClientBuilder()
+			client := builder.Build()
+			w := &Webhook{client: client}
+			ctx, _ := utiltesting.ContextWithLog(t)
+			warns, err := w.ValidateCreate(ctx, tc.sts)
+			if diff := cmp.Diff(tc.wantErr, err, cmpopts.IgnoreFields(field.Error{}, "BadValue", "Detail")); diff != "" {
+				t.Errorf("Unexpected error (-want,+got):\n%s", diff)
+			}
+			if diff := cmp.Diff(warns, tc.wantWarns); diff != "" {
+				t.Errorf("Expected different list of warnings (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestValidateUpdate(t *testing.T) {
 	testCases := map[string]struct {
 		oldObj  *appsv1.StatefulSet
@@ -158,7 +204,7 @@ func TestValidateUpdate(t *testing.T) {
 			wantErr: field.ErrorList{
 				&field.Error{
 					Type:  field.ErrorTypeInvalid,
-					Field: statefulsetQueueNameLabelPath.String(),
+					Field: queueNameLabelPath.String(),
 				},
 			}.ToAggregate(),
 		},
@@ -210,11 +256,59 @@ func TestValidateUpdate(t *testing.T) {
 			wantErr: field.ErrorList{
 				&field.Error{
 					Type:  field.ErrorTypeInvalid,
-					Field: statefulsetGroupNameLabelPath.String(),
+					Field: groupNameLabelPath.String(),
 				},
 			}.ToAggregate(),
 		},
-		"change in replicas": {
+		"change in replicas (scale down to zero)": {
+			oldObj: &appsv1.StatefulSet{
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: ptr.To(int32(3)),
+				},
+			},
+			newObj: &appsv1.StatefulSet{
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			},
+		},
+		"change in replicas (scale up from zero)": {
+			oldObj: &appsv1.StatefulSet{
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			},
+			newObj: &appsv1.StatefulSet{
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: ptr.To(int32(3)),
+				},
+			},
+		},
+		"change in replicas (scale up while the previous scaling operation is still in progress)": {
+			oldObj: &appsv1.StatefulSet{
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+				Status: appsv1.StatefulSetStatus{
+					Replicas: 3,
+				},
+			},
+			newObj: &appsv1.StatefulSet{
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: ptr.To(int32(3)),
+				},
+				Status: appsv1.StatefulSetStatus{
+					Replicas: 1,
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: replicasPath.String(),
+				},
+			}.ToAggregate(),
+		},
+		"change in replicas (scale up)": {
 			oldObj: &appsv1.StatefulSet{
 				Spec: appsv1.StatefulSetSpec{
 					Replicas: ptr.To(int32(3)),
@@ -228,7 +322,7 @@ func TestValidateUpdate(t *testing.T) {
 			wantErr: field.ErrorList{
 				&field.Error{
 					Type:  field.ErrorTypeInvalid,
-					Field: statefulsetReplicasPath.String(),
+					Field: replicasPath.String(),
 				},
 			}.ToAggregate(),
 		},

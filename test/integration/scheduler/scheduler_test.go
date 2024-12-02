@@ -40,8 +40,6 @@ import (
 	"sigs.k8s.io/kueue/test/util"
 )
 
-// +kubebuilder:docs-gen:collapse=Imports
-
 var _ = ginkgo.Describe("Scheduler", func() {
 	const (
 		instanceKey = "cloud.provider.com/instance"
@@ -1801,9 +1799,10 @@ var _ = ginkgo.Describe("Scheduler", func() {
 				g.Expect(k8sClient.Update(ctx, &cq)).Should(gomega.Succeed())
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 
-			// pendingWl exceed nominal+borrowing quota and cannot preempt due to low priority.
+			// pendingWl exceed nominal+borrowing quota and cannot preempt as priority based
+			// premption within CQ is disabled.
 			pendingWl := testing.MakeWorkload("pending-wl", matchingNS.Name).Queue(strictFIFOLocalQueue.
-				Name).Request(corev1.ResourceCPU, "3").Priority(9).Obj()
+				Name).Request(corev1.ResourceCPU, "3").Priority(99).Obj()
 			gomega.Expect(k8sClient.Create(ctx, pendingWl)).Should(gomega.Succeed())
 
 			// borrowingWL can borrow shared resources, so it should be scheduled even if workloads
@@ -2421,7 +2420,7 @@ var _ = ginkgo.Describe("Scheduler", func() {
 						Type:    kueue.WorkloadQuotaReserved,
 						Status:  metav1.ConditionFalse,
 						Reason:  "Pending",
-						Message: "couldn't assign flavors to pod set main: insufficient unused quota in cohort for memory in flavor on-demand, 1Gi more needed",
+						Message: "couldn't assign flavors to pod set main: insufficient unused quota for memory in flavor on-demand, 1Gi more needed",
 					}, util.IgnoreConditionTimestampsAndObservedGeneration),
 				))
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
@@ -2463,7 +2462,7 @@ var _ = ginkgo.Describe("Scheduler", func() {
 						Type:    kueue.WorkloadQuotaReserved,
 						Status:  metav1.ConditionFalse,
 						Reason:  "Pending",
-						Message: "couldn't assign flavors to pod set main: insufficient unused quota in cohort for memory in flavor on-demand, 1Gi more needed",
+						Message: "couldn't assign flavors to pod set main: insufficient unused quota for memory in flavor on-demand, 1Gi more needed",
 					}, util.IgnoreConditionTimestampsAndObservedGeneration),
 				))
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
